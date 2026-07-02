@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 SEED = 42
 ITEM = "cash_flow_item_code"
 TEST_FRAC = 0.15
+# Accounting rules changed after 2022; rows dated in this year or earlier follow the
+# old rules and are dropped before training.
+LAST_OLD_RULES_YEAR = 2022
 
 
 class CatBoostModelEmbeddings(CatBoostModel):
@@ -1287,6 +1290,41 @@ class CatBoostModelEmbeddings(CatBoostModel):
     ):
         if USE_DETAILED_LOG:
             logger.info("Transforming and checking data")
+
+        # Accounting rules changed after 2022, so rows dated in LAST_OLD_RULES_YEAR or
+        # earlier follow the old rules and must not be used for training. Warn and drop
+        # them if present. Unparseable dates become NaT and are kept (not dropped).
+        if "date" in dataset.columns:
+            years = pd.to_datetime(
+                dataset["date"],
+                format="mixed",
+                errors="coerce",
+                dayfirst=True,
+            ).dt.year
+            old_rules_mask = years <= LAST_OLD_RULES_YEAR
+            old_rules_count = int(old_rules_mask.sum())
+            if old_rules_count:
+                shape_before = dataset.shape
+                logger.warning(
+                    "Found %s row(s) with date.year <= %s (old accounting rules); "
+                    "dropping them before training",
+                    old_rules_count,
+                    LAST_OLD_RULES_YEAR,
+                )
+                dataset = dataset[~old_rules_mask].reset_index(drop=True)
+                if USE_DETAILED_LOG:
+                    logger.info(
+                        "Dropped rows with date.year <= %s, shape before=%s, shape after=%s",
+                        LAST_OLD_RULES_YEAR,
+                        shape_before,
+                        dataset.shape,
+                    )
+            elif USE_DETAILED_LOG:
+                logger.info(
+                    "No rows with date.year <= %s, data is okay", LAST_OLD_RULES_YEAR
+                )
+        elif USE_DETAILED_LOG:
+            logger.info("No 'date' column, skipping old-rules year check")
 
         pipeline_list = []
         pipeline_list.append(("checker", Checker(self.parameters)))
