@@ -234,6 +234,7 @@ class CatBoostModelEmbeddings(CatBoostModel):
         lr=0.01,
         trees=20,
         _df_latest: None | pd.DataFrame = None,
+        _df_latest_diag: None | pd.DataFrame = None,
     ):
         """
         Traines few models and choses best based on a given catboost parametrs
@@ -351,6 +352,49 @@ class CatBoostModelEmbeddings(CatBoostModel):
                             cat_features=cat_idxs,
                         )
                         best_model = current_model_test
+
+                        # --- Post-training diagnostic (USE_DETAILED_LOG only) ---
+                        # Honest A/B: the production post-train above fits on
+                        # df_test + _df_latest, so scoring it on df_test would be
+                        # leaky and show the WRONG sign. Instead, continue-train a
+                        # throwaway model on recent data that EXCLUDES df_test, using
+                        # the exact same mechanism, then score on the clean df_test.
+                        # A negative delta => continued training hurts generalization.
+                        if USE_DETAILED_LOG:
+                            acc_diag = None
+                            if (
+                                _df_latest_diag is not None
+                                and len(_df_latest_diag) > 50
+                            ):
+                                diag_model = CatBoostClassifier(
+                                    **_params, allow_const_label=True
+                                ).fit(
+                                    X=_df_latest_diag.drop(y, axis=1),
+                                    y=_df_latest_diag[y],
+                                    init_model=current_model,
+                                    cat_features=cat_idxs,
+                                )
+                                acc_diag, _ = eval_model(
+                                    df_test[f"{y}"],
+                                    diag_model.predict(
+                                        test_pool, prediction_type="Class"
+                                    ),
+                                )
+                                del diag_model
+                                gc.collect()
+                            logger.info(
+                                "[post-train diag] y=%s | base_acc(test)=%.4f "
+                                "continued_acc(test,honest)=%s delta=%s "
+                                "(delta<0 => continued training HURTS generalization; "
+                                "diag_rows=%s)",
+                                y,
+                                acc,
+                                f"{acc_diag:.4f}" if acc_diag is not None else "n/a",
+                                f"{acc_diag - acc:+.4f}"
+                                if acc_diag is not None
+                                else "n/a",
+                                0 if _df_latest_diag is None else len(_df_latest_diag),
+                            )
         return best_model, best_score
 
     def train_on_field(
@@ -518,6 +562,12 @@ class CatBoostModelEmbeddings(CatBoostModel):
                 _df_latest_i = _df_latest_i.query(
                     f"`{y}_norm` not in ['', ' '] and `{y}_norm` != -1"
                 )
+                # Recent rows excluding the test holdout — honest set for the
+                # post-train diagnostic (df_test.index is still original here,
+                # before make_full resets it below).
+                _df_latest_diag_i = _df_latest_i[
+                    ~_df_latest_i.index.isin(df_test.index)
+                ]
 
                 df_train = df_i.drop(df_test.index)
 
@@ -564,6 +614,7 @@ class CatBoostModelEmbeddings(CatBoostModel):
                         trees=parameters.get("trees", 30),
                         all_data=all_data,
                         _df_latest=_df_latest_i,
+                        _df_latest_diag=_df_latest_diag_i,
                     )
                     self.field_models[y][int(item)] = model_i
                     self.field_accuracies.setdefault(y, []).append(acc_i)
@@ -667,6 +718,9 @@ class CatBoostModelEmbeddings(CatBoostModel):
             _df_latest = _df_latest.query(
                 f"`{y}_norm` not in ['', ' '] and `{y}_norm` != -1"
             )
+            # Recent rows excluding the test holdout — honest set for the
+            # post-train diagnostic (df_test.index is still original here).
+            _df_latest_diag = _df_latest[~_df_latest.index.isin(df_test.index)]
 
             df_train = df.drop(df_test.index)
 
@@ -704,6 +758,7 @@ class CatBoostModelEmbeddings(CatBoostModel):
                 trees=parameters.get("trees", 30),
                 all_data=all_data,
                 _df_latest=None if y == "year" else _df_latest,
+                _df_latest_diag=None if y == "year" else _df_latest_diag,
             )
             self.field_models[y] = model_i
             self.field_accuracies[y] = float(acc_i)
@@ -1305,13 +1360,14 @@ class CatBoostModelEmbeddings(CatBoostModel):
             old_rules_count = int(old_rules_mask.sum())
             if old_rules_count:
                 shape_before = dataset.shape
-                logger.warning(
-                    "Found %s row(s) with date.year <= %s (old accounting rules); "
-                    "dropping them before training",
-                    old_rules_count,
-                    LAST_OLD_RULES_YEAR,
-                )
-                dataset = dataset[~old_rules_mask].reset_index(drop=True)
+                if USE_DETAILED_LOG:
+                    logger.warning(
+                        "Found %s row(s) with date.year <= %s (old accounting rules); "
+                        "dropping them before training",
+                        old_rules_count,
+                        LAST_OLD_RULES_YEAR,
+                    )
+                # dataset = dataset[~old_rules_mask].reset_index(drop=True)
                 if USE_DETAILED_LOG:
                     logger.info(
                         "Dropped rows with date.year <= %s, shape before=%s, shape after=%s",
