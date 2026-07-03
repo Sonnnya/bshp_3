@@ -27,7 +27,7 @@ class CBDataEncoder(BaseEstimator, TransformerMixin):
         X[self.y] = X[self.y].astype(int)
 
         self.set_mapping(X)
-        self.set_txt_class_rate(X)
+        # self.set_txt_class_rate(X) #TODO: fix
 
         if USE_DETAILED_LOG:
             logger.info("Len of classes: %s", len(X[self.y].unique()))
@@ -57,6 +57,8 @@ class CBDataEncoder(BaseEstimator, TransformerMixin):
         self.norm2name = dict(zip(self.df["code_norm"], self.df["name"]))
         self.code2name = dict(zip(self.df["code1c"], self.df["name"]))
         self.name2code = dict(zip(self.df["name"], self.df["code_norm"]))
+
+        self.code2rate = None
 
     def set_txt_class_rate(self, X: pd.DataFrame):
         y = self.y

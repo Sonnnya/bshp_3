@@ -54,6 +54,14 @@ async def fit_embeddings(
             parameters=parameters,
         )
 
+        # Reject if too many trainings are already running (released in bg task)
+        if not await model_manager.acquire_training_slot():
+            raise HTTPException(
+                status_code=429,
+                detail="Max concurrent training jobs reached. Try again later.",
+                headers={"Retry-After": "60"},
+            )
+
         # Start background task
         background_tasks.add_task(
             process_fitting_model, task_manager, model_manager, task_id
@@ -61,6 +69,8 @@ async def fit_embeddings(
 
         return TaskResponse(task_id=task_id, message="Task processing started")
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in fitting model: {e}")
 

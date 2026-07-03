@@ -18,9 +18,7 @@ from fastapi.encoders import jsonable_encoder
 from ml.models import ModelManager, get_model_manager
 from schemas.models import ExtDataRow, ModelTypes
 from schemas.tasks import TaskResponse
-from settings import (
-    USE_DETAILED_LOG,
-)
+from settings import USE_DETAILED_LOG, settings
 from tasks.__init__ import Reader, task_manager
 from tasks.processing import (
     process_fitting_model,
@@ -79,10 +77,19 @@ async def fit(
                 base_name="all_bases",
                 parameters=parameters,
             )
+            # Reject if too many trainings are already running (released in bg task)
+            if not await model_manager.acquire_training_slot():
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Max models limit reached ({settings.MAX_MODELS} models training: {', '.join(model_manager.get_training_models_names())}). Try again later.",
+                    headers={"Retry-After": "60"},
+                )
             background_tasks.add_task(
                 process_fitting_model, task_manager, model_manager, task_id
             )
 
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error while fitting embeddings model: {e}")
 
@@ -92,6 +99,16 @@ async def fit(
     # 2. Predict values with embeddings and pass it to catboost model
     task_id = str(uuid.uuid4())
     task = await task_manager.create_task(task_id)
+
+    # Reject before reading data from the DB if too many trainings are already
+    # running, to keep RAM free. Released on any failure below, or by the bg task.
+    if not await model_manager.acquire_training_slot():
+        raise HTTPException(
+            status_code=429,
+            detail=f"Max models limit reached ({settings.MAX_MODELS} models training: {', '.join(model_manager.get_training_models_names())}). Try again later.",
+            headers={"Retry-After": "60"},
+        )
+
     try:
         X_y = await _read_dataset({"data_filter": {"base_name": base_name}})
         if USE_DETAILED_LOG:
@@ -99,6 +116,7 @@ async def fit(
         if X_y.empty:
             raise ValueError("No data. Save the data from 1C")
     except Exception as e:
+        await model_manager.release_training_slot()
         print(traceback.format_exc())
         logger.error(
             f"Collection not found. Please, insure base {base_name} is loaded: {e}"
@@ -106,12 +124,14 @@ async def fit(
         raise HTTPException(
             status_code=404, detail=f"No data. Save the data from 1C. Detail: {str(e)}"
         )
+
     try:
         fsttext = await model_manager.get_model(ModelTypes.extfstxt, "all_bases")
         # модель фасттекст для всех баз одна
         Xy_embed = await fsttext.predict(X_y, set_classes=True)
         Xy_json = json.loads(Xy_embed)
     except Exception as e:
+        await model_manager.release_training_slot()
         print(traceback.format_exc())
         logger.error(f"Error predicting: {e}")
         await task_manager.update_task(task_id, status="ERROR", error=str(e))
@@ -134,7 +154,7 @@ async def fit(
             parameters=parameters,
         )
 
-        # Start background task
+        # Start background task (slot acquired above is released in the bg task)
         background_tasks.add_task(
             process_fitting_model_v2, task_manager, model_manager, task_id, Xy_json
         )
@@ -142,6 +162,8 @@ async def fit(
         return TaskResponse(task_id=task_id, message="Task processing started")
 
     except Exception as e:
+        # Scheduling failed after the slot was acquired — release it.
+        await model_manager.release_training_slot()
         logger.error(f"Error in fitting model: {e}")
 
         await task_manager.update_task(task_id, status="ERROR", error=str(e))

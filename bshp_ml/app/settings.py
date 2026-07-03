@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     TASK_TYPE: str = "CPU"
     DEVICES: str | None = None
     METRICS_FOLDER: Path = BASE_DIR / "metrics"
-    MAX_MODELS: int = 2
+    MAX_MODELS: int = 1
 
     class Config:
         env_file = "../../.env"

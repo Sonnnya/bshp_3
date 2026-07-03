@@ -1,7 +1,7 @@
 services:
   app:
     mem_limit: 6g
-    memswap_limit: 8g
+    memswap_limit: 12g
     cpus: "3.5"
 
   db:

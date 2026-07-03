@@ -98,6 +98,9 @@ async def process_fitting_model(
 
         await task_manager.update_task(task_id, status="ERROR", error=str(e))
 
+    finally:
+        await model_manager.release_training_slot()
+
 
 async def process_fitting_model_v2(
     task_manager: TaskManager, model_manager: ModelManager, task_id: str, Xy_api: dict
@@ -152,3 +155,6 @@ async def process_fitting_model_v2(
         logger.exception(f"[{task_id}] Error in model fitting task: {e}")
 
         await task_manager.update_task(task_id, status="ERROR", error=str(e))
+
+    finally:
+        await model_manager.release_training_slot()

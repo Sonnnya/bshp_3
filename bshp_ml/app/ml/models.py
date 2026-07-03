@@ -1,3 +1,4 @@
+import asyncio
 import gc
 import json
 import logging
@@ -609,6 +610,46 @@ class ModelManager:
         self.max_models = (
             settings.MAX_MODELS
         )  # max models for training at the same time
+        self.active_training = 0
+        self._slot_lock = asyncio.Lock()
+
+    async def acquire_training_slot(self) -> bool:
+        """Reserve one training slot. Non-blocking: returns False if already at
+        MAX_MODELS. The lock guards check+increment so it stays correct even if
+        an await is ever added to the critical section."""
+        async with self._slot_lock:
+            if self.active_training >= self.max_models:
+                logger.warning(
+                    "Training slot limit reached (%d/%d active). Rejecting request.",
+                    self.active_training,
+                    self.max_models,
+                )
+                return False
+            self.active_training += 1
+            logger.info(
+                "Training slot acquired (%d/%d active).",
+                self.active_training,
+                self.max_models,
+            )
+            return True
+
+    def get_training_models_names(self) -> list[str]:
+        """Get list of currently training models names for logging purposes."""
+        return [
+            f"{model['model'].model_type.value}_{model['model'].base_name}"
+            for model in self.models
+            if model["model"].status == ModelStatuses.FITTING
+        ]
+
+    async def release_training_slot(self) -> None:
+        async with self._slot_lock:
+            if self.active_training > 0:
+                self.active_training -= 1
+            logger.info(
+                "Training slot released (%d/%d active).",
+                self.active_training,
+                self.max_models,
+            )
 
     async def read_models(self):
         models = []

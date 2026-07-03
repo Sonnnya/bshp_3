@@ -23,3 +23,5 @@ __pycache__
 ___*
 /metrics/
 *.md
+.claude
+_to_understand_errors

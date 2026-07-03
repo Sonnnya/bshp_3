@@ -78,7 +78,7 @@ class CatBoostModelEmbeddings(CatBoostModel):
 
         # self.categorical.extend([f"pred_pp_{y}" for y in self.fsttxt_columns])
         # self.float_columns.extend([f"prob_pp_{y}" for y in self.fsttxt_columns])
-        self.float_columns.extend([f"class_rate_{y}" for y in self.fsttxt_columns])
+        # self.float_columns.extend([f"class_rate_{y}" for y in self.fsttxt_columns])
 
         self.str_columns.extend(
             [f"pred_{y}" for y in self.fsttxt_columns]
@@ -97,7 +97,7 @@ class CatBoostModelEmbeddings(CatBoostModel):
         )
         self.x_columns.extend(
             [f"pred_{y}" for y in self.fsttxt_columns]
-            + [f"class_rate_{y}" for y in self.fsttxt_columns]
+            # + [f"class_rate_{y}" for y in self.fsttxt_columns]
             + [
                 "payment_purpose",
                 "contract_name",
@@ -373,19 +373,25 @@ class CatBoostModelEmbeddings(CatBoostModel):
         #     .str.strip()
         # )
 
-        UNFEATURED = [
-            "company_inn",
-            "contractor_name",
-            "contractor_kpp",
-            "qty",
-            "price",
-            "sum",
-            "contractor_account_number",
-            "company_account_number",
-            "article_row_number",
-            "row_number",
-            "number",
-        ] + [f"pred_pp_{y}" for y in self.fsttxt_columns]
+        UNFEATURED = (
+            [
+                "company_inn",
+                "contractor_name",
+                "contractor_kpp",
+                "qty",
+                "price",
+                "sum",
+                "contractor_account_number",
+                "company_account_number",
+                "article_row_number",
+                "row_number",
+                "number",
+            ]
+            + [f"pred_pp_{y}" for y in self.fsttxt_columns]
+            + [
+                f"class_rate_{y}" for y in self.fsttxt_columns
+            ]  # wrong count somitimes. TODO: fix counting that field in encoder and check accuracies
+        )
 
         if y != "year":
             UNFEATURED += ["pred_pp_year", "prob_pp_year", "pred_year", "prob_year"]
@@ -452,6 +458,13 @@ class CatBoostModelEmbeddings(CatBoostModel):
                         + self.fsttxt_columns
                         + ["uploading_date"]
                         if (c in df_i.columns and c not in categorical)
+                    ]
+                )
+                to_drop.extend(
+                    [
+                        c
+                        for c in UNFEATURED
+                        if c not in categorical and c in df_i.columns
                     ]
                 )
 
@@ -589,7 +602,7 @@ class CatBoostModelEmbeddings(CatBoostModel):
                 name_col="cash_flow_item_name"
                 if y == "cash_flow_item_code"
                 else "year",
-            )
+            )  # encoder adds some fields too ... TODO: one place for all
             df = encoder.fit_transform(df, None)
             encoder.save(os.path.join(MODEL_FOLDER, self.uid, y))
             self.field_encoders[y] = encoder
@@ -601,6 +614,9 @@ class CatBoostModelEmbeddings(CatBoostModel):
                     for c in self.str_columns + self.fsttxt_columns + ["uploading_date"]
                     if (c in df.columns and c not in self.categorical)
                 ]
+            )
+            to_drop.extend(
+                [c for c in UNFEATURED if c not in categorical and c in df.columns]
             )
             df.drop(to_drop, axis=1, inplace=True)
 
@@ -684,7 +700,7 @@ class CatBoostModelEmbeddings(CatBoostModel):
                 lr=parameters.get("lr", 0.01),
                 trees=parameters.get("trees", 30),
                 all_data=all_data,
-                _df_latest=_df_latest,
+                _df_latest=None if y == "year" else _df_latest,
             )
             self.field_models[y] = model_i
             self.field_accuracies[y] = float(acc_i)
@@ -1002,6 +1018,18 @@ class CatBoostModelEmbeddings(CatBoostModel):
             else:
                 X_y[y] = X_y[y].astype(str)
         return X_y.to_dict(orient="records")
+
+        # records = X_y.to_dict(orient="records")
+        # # Sanitize non-finite floats before serialization. The per-item details
+        # # loop writes back inconsistent column sets across items (e.g. strict
+        # # items keep the encoder-created class_rate_*, model items drop it; unseen
+        # # items leave *_norm unfilled), so internal helper columns can end up NaN.
+        # # Starlette's JSONResponse uses allow_nan=False and 500s on NaN/inf.
+        # for record in records:
+        #     for key, value in record.items():
+        #         if isinstance(value, float) and not math.isfinite(value):
+        #             record[key] = None
+        # return records
         # if self.need_to_encode:
         #     X_y = pipeline.named_steps["data_encoder"].inverse_transform(X_y)
 
@@ -1264,6 +1292,7 @@ class CatBoostModelEmbeddings(CatBoostModel):
         pipeline_list.append(("checker", Checker(self.parameters)))
         pipeline_list.append(("nan_processor", NanProcessor(self.parameters)))
         pipeline_list.append(("feature_adder", FeatureAdder(self.parameters)))
+        # old logic
         # if self.need_to_encode:
         #     if need_to_initialize:
         #         self.data_encoder = DataEncoder(self.parameters)
@@ -1274,6 +1303,10 @@ class CatBoostModelEmbeddings(CatBoostModel):
 
         pipeline = Pipeline(pipeline_list)
         dataset = pipeline.fit_transform(dataset)
+        # this shuffle instead of sklearn.shuffler
+        dataset = dataset.sample(frac=1, random_state=SEED).reset_index(drop=True)
+        if USE_DETAILED_LOG:
+            logger.info("Performed shuffle, shape: %s", dataset.shape)
 
         for y in self.y_columns:
             dataset[y] = dataset[y].replace(r"^\s*$", -1, regex=True)
